@@ -1,0 +1,76 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function isAdmin() {
+      return isAuthenticated() && 
+        (request.auth.token.role == 'admin' || 
+         request.auth.token.role == 'moderator' ||
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'moderator']);
+    }
+
+    // USERS COLLECTION
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && request.auth.uid == userId;
+      allow update: if isOwner(userId) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'isBanned']) || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ITEMS COLLECTION
+    match /items/{itemId} {
+      allow read: if true; // Public campus board
+      allow create: if isAuthenticated() && request.resource.data.reporterId == request.auth.uid;
+      allow update: if isAuthenticated() && (
+        resource.data.reporterId == request.auth.uid || 
+        isAdmin() ||
+        // Allow claim increment transaction
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['activeClaimCount', 'status', 'updatedAt', 'verifiedClaimId'])
+      );
+      allow delete: if isOwner(resource.data.reporterId) || isAdmin();
+
+      // AUDIT EVENT LOG SUBCOLLECTION
+      match /events/{eventId} {
+        allow read: if isAuthenticated();
+        allow create: if isAuthenticated();
+        allow update, delete: if false; // Immutable audit trail
+      }
+    }
+
+    // CLAIMS COLLECTION (Strict Privacy Protection)
+    match /claims/{claimId} {
+      // ONLY the claimant, the item finder, or an admin can view private evidence
+      allow read: if isAuthenticated() && (
+        resource.data.claimantId == request.auth.uid ||
+        resource.data.itemReporterId == request.auth.uid ||
+        isAdmin()
+      );
+      // Prevent finder from claiming their own item
+      allow create: if isAuthenticated() && 
+        request.resource.data.claimantId == request.auth.uid &&
+        request.resource.data.itemReporterId != request.auth.uid;
+      // Finder or Admin can review and update claim status
+      allow update: if isAuthenticated() && (
+        resource.data.itemReporterId == request.auth.uid ||
+        resource.data.claimantId == request.auth.uid ||
+        isAdmin()
+      );
+      allow delete: if isAdmin();
+    }
+
+    // NOTIFICATIONS COLLECTION
+    match /notifications/{notifId} {
+      allow read, update: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow create: if isAuthenticated();
+      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+    }
+  }
+}
